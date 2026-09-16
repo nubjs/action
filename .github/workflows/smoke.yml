@@ -520,3 +520,137 @@ jobs:
           out="$(npm run --silent hello)"
           [[ "$out" == "42" ]] || { echo "::error::npm run hello printed '$out', expected 42"; exit 1; }
           echo "additive OK: nub installed package-lock.json, node $nv, npm run works"
+
+  # ---- nubjs/action/install ----
+  # The outreach shape: setup-node untouched, cache: npm left in place, the
+  # npm ci line replaced by this action. setup-node's cache is forced to a
+  # miss so its post step meets an npm cache directory nub never wrote.
+  install-dropin:
+    name: after setup-node with cache npm, in place of npm ci (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: echo "${{ github.run_id }}-${{ github.run_attempt }}" > smoke/install/fixture/run.txt
+        shell: bash
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: smoke/install/fixture/run.txt
+      - uses: ./install
+        id: install
+        with:
+          working-directory: smoke/install/fixture
+      - name: the lockfile is installed on nub's engine; bare node and npm are setup-node's
+        shell: bash
+        working-directory: smoke/install/fixture
+        env:
+          OUT_NUB: ${{ steps.install.outputs.nub-version }}
+        run: |
+          set -euo pipefail
+          [[ "$OUT_NUB" == v* ]] || { echo "::error::nub-version output is '$OUT_NUB'"; exit 1; }
+          # nub's engine writes .modules.yaml; npm never does.
+          [ -f node_modules/.modules.yaml ] || { echo "::error::the install did not run on nub's engine"; exit 1; }
+          [ -e node_modules/local-dep ] || { echo "::error::the file: dependency is not linked"; exit 1; }
+          node -e "require('is-number')" || { echo "::error::is-number did not install"; exit 1; }
+          nv="$(node -p 'process.versions.node')"
+          [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected setup-node's 20.x"; exit 1; }
+          out="$(npm run --silent hello)"
+          [[ "$out" == "42" ]] || { echo "::error::npm run hello printed '$out', expected 42"; exit 1; }
+          echo "OK: $OUT_NUB installed the lockfile, node $nv, npm run works"
+
+  install-not-frozen:
+    name: frozen-lockfile false installs without a lockfile (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rm smoke/install/fixture/package-lock.json
+      - uses: ./install
+        with:
+          working-directory: smoke/install/fixture
+          frozen-lockfile: false
+          cache: false
+      - run: |
+          set -euo pipefail
+          cd smoke/install/fixture
+          node -e "require('is-number')" || { echo "::error::is-number did not install"; exit 1; }
+          echo "OK"
+
+  # A pnpm lockfile, and the pinned pnpm provisioned for later steps by the
+  # shim: no pnpm/action-setup, no corepack.
+  install-pnpm:
+    name: pnpm-lock.yaml, then the pinned pnpm through the shim (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+      - uses: ./install
+        with:
+          working-directory: smoke/install/fixture-pnpm
+          shim: true
+      - shell: bash
+        working-directory: smoke/install/fixture-pnpm
+        run: |
+          set -euo pipefail
+          [ -f node_modules/.modules.yaml ] || { echo "::error::the install did not run on nub's engine"; exit 1; }
+          node -e "require('is-number')" || { echo "::error::is-number did not install"; exit 1; }
+          p="$(command -v pnpm)"
+          [[ "$p" == *nub*shims* ]] || { echo "::error::pnpm resolves to '$p', not nub's shim"; exit 1; }
+          v="$(pnpm --version)"
+          [[ "$v" == "10.15.1" ]] || { echo "::error::pnpm --version is $v, expected the pinned 10.15.1"; exit 1; }
+          out="$(pnpm run --silent hello)"
+          [[ "$out" == "42" ]] || { echo "::error::pnpm run hello printed '$out', expected 42"; exit 1; }
+          nv="$(node -p 'process.versions.node')"
+          [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected setup-node's 20.x"; exit 1; }
+          echo "OK: pnpm-lock.yaml installed, pnpm $v via $p, node $nv"
+
+  # The store cache round-trips. A per-run file in the key makes the seed a
+  # miss and the second job an exact hit, whose install then runs offline.
+  install-cache-seed:
+    name: cache seed, a miss (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: echo "${{ github.run_id }}-${{ github.run_attempt }}" > smoke/install/fixture/run.txt
+      - uses: ./install
+        id: install
+        with:
+          working-directory: smoke/install/fixture
+          cache-dependency-path: |
+            smoke/install/fixture/package-lock.json
+            smoke/install/fixture/run.txt
+      - run: |
+          set -euo pipefail
+          [ "${{ steps.install.outputs.cache-hit }}" != "true" ] || { echo "::error::cache-hit is true on a fresh key"; exit 1; }
+          echo "OK: seeded"
+
+  install-cache-hit:
+    name: cache hit, then an offline install from the restored store (ubuntu-latest)
+    needs: install-cache-seed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: echo "${{ github.run_id }}-${{ github.run_attempt }}" > smoke/install/fixture/run.txt
+      - uses: ./install
+        id: install
+        with:
+          working-directory: smoke/install/fixture
+          args: --offline
+          cache-dependency-path: |
+            smoke/install/fixture/package-lock.json
+            smoke/install/fixture/run.txt
+      - run: |
+          set -euo pipefail
+          [ "${{ steps.install.outputs.cache-hit }}" = "true" ] || { echo "::error::cache-hit is '${{ steps.install.outputs.cache-hit }}', expected true"; exit 1; }
+          [ -f smoke/install/fixture/node_modules/.modules.yaml ]
+          echo "OK: exact hit, offline install succeeded"
