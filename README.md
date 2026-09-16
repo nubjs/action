@@ -8,7 +8,7 @@ GitHub Actions for [nub](https://github.com/nubjs/nub), one per directory:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: nubjs/action/setup-node@v1
+- uses: nubjs/action/setup-node@v0
 - run: npm ci
 ```
 
